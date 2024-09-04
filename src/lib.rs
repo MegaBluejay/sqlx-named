@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use indexmap::IndexMap;
 use proc_macro2::{Ident, Span};
@@ -131,14 +134,27 @@ fn expand(input: QueryInput, out_ident: Ident) -> proc_macro2::TokenStream {
         .tokenize()
         .expect("failed to tokenize sql");
 
+    let mut used = HashSet::new();
+
     for token in &mut tokens {
         if let sqlparser::tokenizer::Token::Placeholder(placeholder) = token {
             let arg = &placeholder[1..];
             let Some(index) = input.args.get_index_of(arg) else {
                 panic!("arg not given: {}", arg);
             };
+            used.insert(arg);
             *placeholder = format!("${}", index + 1);
         }
+    }
+
+    let unused = input
+        .args
+        .keys()
+        .filter(|arg| !used.contains(arg))
+        .collect::<Vec<_>>();
+
+    if !unused.is_empty() {
+        panic!("unused args: {:?}", unused.as_slice());
     }
 
     let as_type = input.as_type.map(|as_type| quote! { #as_type, });
