@@ -6,7 +6,7 @@ use syn::{
     parse_quote,
     punctuated::Punctuated,
     token::{Brace, Paren},
-    AngleBracketedGenericArguments, Expr, Ident, LitInt, LitStr, Member, Token, Type,
+    AngleBracketedGenericArguments, Expr, Ident, LitInt, LitStr, Member, Token, Type, UnOp,
 };
 
 use crate::util::read_file_src;
@@ -90,6 +90,10 @@ enum RawArg {
 fn get_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Path(path) => Some(path.path.get_ident()?.to_string()),
+        Expr::Reference(rf) => get_name(&rf.expr),
+        Expr::Await(wait) => get_name(&wait.base),
+        Expr::Try(tr) => get_name(&tr.expr),
+        Expr::Unary(un) if matches!(&un.op, UnOp::Deref(_)) => get_name(&un.expr),
         _ => None,
     }
 }
@@ -99,10 +103,13 @@ impl RawArg {
         match self {
             RawArg::Single(expr) => {
                 let arg = match expr {
-                    Expr::Path(path) => Arg {
-                        typ: ArgType::Unnamed(path.path.get_ident().map(|ident| ident.to_string())),
-                        val: Expr::Path(path),
-                    },
+                    Expr::Path(path) => {
+                        let expr = Expr::Path(path);
+                        Arg {
+                            typ: ArgType::Unnamed(get_name(&expr)),
+                            val: expr,
+                        }
+                    }
                     Expr::Cast(cast) => Arg {
                         typ: ArgType::Unnamed(get_name(&cast.expr)),
                         val: Expr::Cast(cast),
