@@ -136,9 +136,11 @@ impl RawArg {
                         cast,
                     } = child;
 
-                    let typ = match (assign, &target) {
+                    let typ = match (assign, target.first()) {
                         (Some(ass), _) => ArgType::Named(ass.name.to_string()),
-                        (_, RawChildTarget::Member(Member::Named(name))) => {
+                        (_, Some(RawChildTarget::Member(Member::Named(name))))
+                            if target.len() == 1 =>
+                        {
                             ArgType::Unnamed(Some(name.to_string()))
                         }
                         _ => ArgType::Unnamed(None),
@@ -181,7 +183,7 @@ impl Parse for RawArg {
 struct RawChild {
     assign: Option<Assign>,
     dot_token: Token![.],
-    target: RawChildTarget,
+    target: Punctuated<RawChildTarget, Token![.]>,
     cast: Option<Cast>,
 }
 
@@ -194,7 +196,7 @@ impl Parse for RawChild {
                 None
             },
             dot_token: input.parse()?,
-            target: input.parse()?,
+            target: Punctuated::parse_separated_nonempty(input)?,
             cast: if input.peek(Token![as]) {
                 Some(input.parse()?)
             } else {
