@@ -1,152 +1,15 @@
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use std::collections::HashSet;
 
 use indexmap::IndexMap;
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use sqlparser::{dialect::PostgreSqlDialect, tokenizer::Tokenizer};
-use syn::{
-    parse::{ParseStream, Parser},
-    punctuated::Punctuated,
-    Expr, LitStr, Token, Type,
-};
+use syn::parse::Parser as _;
 
-fn get_name(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Path(path) => Some(path.path.get_ident()?.to_string()),
-        _ => None,
-    }
-}
+use crate::parse::{ArgType, QueryInput, QueryVariant};
 
-fn parse_arg(input: ParseStream) -> syn::Result<Arg> {
-    let expr = input.parse::<Expr>()?;
-
-    Ok(match expr {
-        Expr::Path(path) => Arg {
-            typ: ArgType::Unnamed(path.path.get_ident().map(|ident| ident.to_string())),
-            expr: Expr::Path(path),
-        },
-        Expr::Cast(cast) => Arg {
-            typ: ArgType::Unnamed(get_name(&cast.expr)),
-            expr: Expr::Cast(cast),
-        },
-        Expr::Assign(ass) => Arg {
-            typ: ArgType::Named(
-                get_name(&ass.left)
-                    .ok_or_else(|| syn::Error::new_spanned(ass.left, "invalid arg name"))?,
-            ),
-            expr: *ass.right,
-        },
-        expr => Arg {
-            typ: ArgType::Unnamed(None),
-            expr,
-        },
-    })
-}
-
-// from sqlx-macros-core
-fn read_file_src(source: &str, source_span: Span) -> syn::Result<String> {
-    let file_path = resolve_path(source, source_span)?;
-
-    std::fs::read_to_string(&file_path).map_err(|e| {
-        syn::Error::new(
-            source_span,
-            format!(
-                "failed to read query file at {}: {}",
-                file_path.display(),
-                e
-            ),
-        )
-    })
-}
-
-// from sqlx-macros-core
-fn resolve_path(path: impl AsRef<Path>, err_span: Span) -> syn::Result<PathBuf> {
-    let path = path.as_ref();
-
-    if path.is_absolute() {
-        return Err(syn::Error::new(
-            err_span,
-            "absolute paths will only work on the current machine",
-        ));
-    }
-
-    // requires `proc_macro::SourceFile::path()` to be stable
-    // https://github.com/rust-lang/rust/issues/54725
-    if path.is_relative()
-        && !path
-            .parent()
-            .map_or(false, |parent| !parent.as_os_str().is_empty())
-    {
-        return Err(syn::Error::new(
-            err_span,
-            "paths relative to the current file's directory are not currently supported",
-        ));
-    }
-
-    let base_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
-        syn::Error::new(
-            err_span,
-            "CARGO_MANIFEST_DIR is not set; please use Cargo to build",
-        )
-    })?;
-    let base_dir_path = Path::new(&base_dir);
-
-    Ok(base_dir_path.join(path))
-}
-
-enum ArgType {
-    Unnamed(Option<String>),
-    Named(String),
-}
-
-struct Arg {
-    typ: ArgType,
-    expr: Expr,
-}
-
-struct QueryInput {
-    as_type: Option<Type>,
-    sql: String,
-    args: Punctuated<Arg, Token![,]>,
-}
-
-struct QueryVariant {
-    file: bool,
-    as_type: bool,
-}
-
-impl QueryVariant {
-    fn parse_query(self) -> impl Parser<Output = QueryInput> {
-        move |input: ParseStream| {
-            let as_type = if self.as_type {
-                let as_type = input.parse()?;
-                input.parse::<Token![,]>()?;
-                Some(as_type)
-            } else {
-                None
-            };
-
-            let lit_str = input.parse::<LitStr>()?;
-            let sql = if self.file {
-                read_file_src(&lit_str.value(), lit_str.span())?
-            } else {
-                lit_str.value()
-            };
-
-            let args = if input.is_empty() {
-                Default::default()
-            } else {
-                input.parse::<Token![,]>()?;
-                input.parse_terminated(parse_arg, Token![,])?
-            };
-
-            Ok(QueryInput { as_type, sql, args })
-        }
-    }
-}
+mod parse;
+mod util;
 
 fn expand(input: QueryInput, out_ident: Ident) -> syn::Result<proc_macro2::TokenStream> {
     let mut tokens = Tokenizer::new(&PostgreSqlDialect {}, &input.sql)
@@ -166,8 +29,8 @@ fn expand(input: QueryInput, out_ident: Ident) -> syn::Result<proc_macro2::Token
             .args
             .into_iter()
             .map(|arg| match arg.typ {
-                ArgType::Named(_) => Err(syn::Error::new_spanned(arg.expr, "named arg")),
-                ArgType::Unnamed(_) => Ok(arg.expr),
+                ArgType::Named(_) => Err(syn::Error::new_spanned(arg.val, "named arg")),
+                ArgType::Unnamed(_) => Ok(arg.val),
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -180,10 +43,10 @@ fn expand(input: QueryInput, out_ident: Ident) -> syn::Result<proc_macro2::Token
                 let name = match arg.typ {
                     ArgType::Named(name) => Ok(name),
                     ArgType::Unnamed(name) => {
-                        name.ok_or_else(|| syn::Error::new_spanned(&arg.expr, "unnamed arg"))
+                        name.ok_or_else(|| syn::Error::new_spanned(&arg.val, "unnamed arg"))
                     }
                 }?;
-                Ok::<_, syn::Error>((name, arg.expr))
+                Ok::<_, syn::Error>((name, arg.val))
             })
             .collect::<Result<IndexMap<_, _>, _>>()?;
 
