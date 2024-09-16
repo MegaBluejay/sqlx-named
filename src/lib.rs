@@ -9,32 +9,41 @@ use quote::quote;
 use sqlparser::{dialect::PostgreSqlDialect, tokenizer::Tokenizer};
 use syn::{
     parse::{ParseStream, Parser},
+    punctuated::Punctuated,
     Expr, LitStr, Token, Type,
 };
 
-fn get_name(expr: &Expr) -> syn::Result<String> {
+fn get_name(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Path(path) => Ok(path.path.require_ident()?.to_string()),
-        _ => Err(syn::Error::new_spanned(expr, "invalid arg name")),
+        Expr::Path(path) => Some(path.path.get_ident()?.to_string()),
+        _ => None,
     }
 }
 
-fn parse_arg(input: ParseStream) -> syn::Result<(String, Expr)> {
+fn parse_arg(input: ParseStream) -> syn::Result<Arg> {
     let expr = input.parse::<Expr>()?;
 
     Ok(match expr {
-        Expr::Path(path) => (path.path.require_ident()?.to_string(), Expr::Path(path)),
-        Expr::Cast(cast) => (get_name(&cast.expr)?, Expr::Cast(cast)),
-        Expr::Assign(ass) => (get_name(&ass.left)?, *ass.right),
-        _ => return Err(syn::Error::new_spanned(expr, "invalid arg")),
+        Expr::Path(path) => Arg {
+            typ: ArgType::Unnamed(path.path.get_ident().map(|ident| ident.to_string())),
+            expr: Expr::Path(path),
+        },
+        Expr::Cast(cast) => Arg {
+            typ: ArgType::Unnamed(get_name(&cast.expr)),
+            expr: Expr::Cast(cast),
+        },
+        Expr::Assign(ass) => Arg {
+            typ: ArgType::Named(
+                get_name(&ass.left)
+                    .ok_or_else(|| syn::Error::new_spanned(ass.left, "invalid arg name"))?,
+            ),
+            expr: *ass.right,
+        },
+        expr => Arg {
+            typ: ArgType::Unnamed(None),
+            expr,
+        },
     })
-}
-
-fn parse_args(input: ParseStream) -> syn::Result<IndexMap<String, Expr>> {
-    Ok(input
-        .parse_terminated(parse_arg, Token![,])?
-        .into_iter()
-        .collect())
 }
 
 // from sqlx-macros-core
@@ -88,10 +97,20 @@ fn resolve_path(path: impl AsRef<Path>, err_span: Span) -> syn::Result<PathBuf> 
     Ok(base_dir_path.join(path))
 }
 
+enum ArgType {
+    Unnamed(Option<String>),
+    Named(String),
+}
+
+struct Arg {
+    typ: ArgType,
+    expr: Expr,
+}
+
 struct QueryInput {
     as_type: Option<Type>,
     sql: String,
-    args: IndexMap<String, Expr>,
+    args: Punctuated<Arg, Token![,]>,
 }
 
 struct QueryVariant {
@@ -121,7 +140,7 @@ impl QueryVariant {
                 Default::default()
             } else {
                 input.parse::<Token![,]>()?;
-                parse_args(input)?
+                input.parse_terminated(parse_arg, Token![,])?
             };
 
             Ok(QueryInput { as_type, sql, args })
@@ -129,47 +148,81 @@ impl QueryVariant {
     }
 }
 
-fn expand(input: QueryInput, out_ident: Ident) -> proc_macro2::TokenStream {
+fn expand(input: QueryInput, out_ident: Ident) -> syn::Result<proc_macro2::TokenStream> {
     let mut tokens = Tokenizer::new(&PostgreSqlDialect {}, &input.sql)
         .tokenize()
         .expect("failed to tokenize sql");
 
-    let mut used = HashSet::new();
+    let unnamed = tokens
+        .iter()
+        .filter_map(|token| match token {
+            sqlparser::tokenizer::Token::Placeholder(placeholder) => Some(placeholder),
+            _ => None,
+        })
+        .all(|placeholder| placeholder.chars().skip(1).all(|c| c.is_ascii_digit()));
 
-    for token in &mut tokens {
-        if let sqlparser::tokenizer::Token::Placeholder(placeholder) = token {
-            let arg = &placeholder[1..];
-            let Some(index) = input.args.get_index_of(arg) else {
-                panic!("arg not given: {}", arg);
-            };
-            used.insert(arg);
-            *placeholder = format!("${}", index + 1);
+    let (sql, args) = if unnamed {
+        let args = input
+            .args
+            .into_iter()
+            .map(|arg| match arg.typ {
+                ArgType::Named(_) => Err(syn::Error::new_spanned(arg.expr, "named arg")),
+                ArgType::Unnamed(_) => Ok(arg.expr),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        (input.sql, args)
+    } else {
+        let named_args = input
+            .args
+            .into_iter()
+            .map(|arg| {
+                let name = match arg.typ {
+                    ArgType::Named(name) => Ok(name),
+                    ArgType::Unnamed(name) => {
+                        name.ok_or_else(|| syn::Error::new_spanned(&arg.expr, "unnamed arg"))
+                    }
+                }?;
+                Ok::<_, syn::Error>((name, arg.expr))
+            })
+            .collect::<Result<IndexMap<_, _>, _>>()?;
+
+        let mut used = HashSet::new();
+
+        for token in &mut tokens {
+            if let sqlparser::tokenizer::Token::Placeholder(placeholder) = token {
+                let arg = &placeholder[1..];
+                let Some(index) = named_args.get_index_of(arg) else {
+                    panic!("arg not given: {}", arg);
+                };
+                used.insert(arg.to_owned());
+                *placeholder = format!("${}", index + 1);
+            }
         }
-    }
 
-    let unused = input
-        .args
-        .keys()
-        .filter(|arg| !used.contains(arg))
-        .collect::<Vec<_>>();
+        let unused = named_args
+            .keys()
+            .filter(|arg| !used.contains(*arg))
+            .collect::<Vec<_>>();
 
-    if !unused.is_empty() {
-        panic!("unused args: {:?}", unused.as_slice());
-    }
+        if !unused.is_empty() {
+            panic!("unused args: {:?}", unused.as_slice());
+        }
+
+        let sql = tokens
+            .into_iter()
+            .map(|token| token.to_string())
+            .collect::<Vec<_>>()
+            .concat();
+
+        (sql, named_args.into_values().collect::<Vec<_>>())
+    };
 
     let as_type = input.as_type.map(|as_type| quote! { #as_type, });
 
-    let sql = tokens
-        .into_iter()
-        .map(|token| token.to_string())
-        .collect::<Vec<_>>()
-        .concat();
-
-    let args = input.args.into_values();
-
-    quote! {
+    Ok(quote! {
         ::sqlx::#out_ident!(#as_type #sql, #(#args),*)
-    }
+    })
 }
 
 fn query_generic(
@@ -177,11 +230,14 @@ fn query_generic(
     out_ident: Ident,
     input: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
-    let input = match variant.parse_query().parse(input) {
-        Ok(input) => input,
-        Err(err) => return proc_macro::TokenStream::from(err.to_compile_error()),
-    };
-    expand(input, out_ident).into()
+    match variant
+        .parse_query()
+        .parse(input)
+        .and_then(|input| expand(input, out_ident))
+    {
+        Ok(out) => out.into(),
+        Err(err) => proc_macro::TokenStream::from(err.to_compile_error()),
+    }
 }
 
 macro_rules! def_variant {
