@@ -470,17 +470,17 @@ async fn test_query_many_args_named(db: PgPool) -> Result<()> {
     let rows = sqlx_named::query!(
         "SELECT * from unnest(array[$one, $two, $three, $four, $five, $six, $seven, $eight, $nine, $ten, $eleven, $twelve]::int[]) ids(id)",
         one = 0,
+        nine = 8,
         two,
         three = 2,
         four = 3,
-        five = 4,
         six = 5,
         seven,
         eight = 7,
-        nine = 8,
         ten = 9,
         eleven = 10,
         twelve = 11,
+        five = 4,
     ).fetch_all(&db).await?;
 
     for (i, row) in rows.into_iter().enumerate() {
@@ -609,6 +609,63 @@ async fn test_query_named_override_wildcard(db: PgPool) -> Result<()> {
     .fetch_one(&db)
     .await?;
     assert_eq!(record.id, Some(1i32));
+
+    Ok(())
+}
+
+struct Args {
+    id: i32,
+    money: MyInt4,
+}
+
+impl Args {
+    fn age(&self) -> i32 {
+        4
+    }
+}
+
+#[sqlx::test]
+async fn test_query_unnamed_splat(db: PgPool) -> Result<()> {
+    let args = Args {
+        id: 2,
+        money: MyInt4(3),
+    };
+    let record = sqlx_named::query!(
+        r#"select $1::int "first!", $2::int "id!", $3::int "money!", $4::int "age!", $5::int "fifth!" "#,
+        1,
+        ..args{.id, .money as _, .age()},
+        5,
+    )
+    .fetch_one(&db)
+    .await?;
+
+    assert_eq!(record.first, 1);
+    assert_eq!(record.id, 2);
+    assert_eq!(record.money, 3);
+    assert_eq!(record.age, 4);
+    assert_eq!(record.fifth, 5);
+
+    Ok(())
+}
+
+#[sqlx::test]
+async fn test_query_named_splat(db: PgPool) -> Result<()> {
+    let args = Args {
+        id: 2,
+        money: MyInt4(3),
+    };
+    let record = sqlx_named::query!(
+        r#"select $first::int "first!", $id::int "id!", $money::int "money!", $age::int "age!", $fifth::int "fifth!" "#,
+        first = 1,
+        ..args{.id, .money as _, age = .age()},
+        fifth = 5
+    ).fetch_one(&db).await?;
+
+    assert_eq!(record.first, 1);
+    assert_eq!(record.id, 2);
+    assert_eq!(record.money, 3);
+    assert_eq!(record.age, 4);
+    assert_eq!(record.fifth, 5);
 
     Ok(())
 }

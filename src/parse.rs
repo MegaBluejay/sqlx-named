@@ -1,26 +1,29 @@
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::{
-    bracketed, parenthesized,
+    braced, parenthesized,
     parse::{Parse, ParseStream, Parser},
     parse_quote,
     punctuated::Punctuated,
-    token::{Bracket, Paren},
+    token::{Brace, Paren},
     AngleBracketedGenericArguments, Expr, Ident, LitInt, LitStr, Member, Token, Type,
 };
 
 use crate::util::read_file_src;
 
+#[derive(Debug)]
 pub enum ArgType {
     Unnamed(Option<String>),
     Named(String),
 }
 
+#[derive(Debug)]
 pub struct Arg {
     pub typ: ArgType,
     pub val: Expr,
 }
 
+#[derive(Debug)]
 pub struct QueryInput {
     pub as_type: Option<Type>,
     pub sql: String,
@@ -79,7 +82,7 @@ enum RawArg {
     Splat {
         _splat_token: Token![..],
         parent: Expr,
-        _bracket_token: Bracket,
+        _brace_token: Brace,
         children: Punctuated<RawChild, Token![,]>,
     },
 }
@@ -120,7 +123,7 @@ impl RawArg {
             RawArg::Splat {
                 _splat_token: _,
                 parent,
-                _bracket_token: _,
+                _brace_token: _,
                 children,
             } => {
                 for pair in children.into_pairs() {
@@ -133,14 +136,16 @@ impl RawArg {
                         cast,
                     } = child;
 
+                    let typ = match (assign, &target) {
+                        (Some(ass), _) => ArgType::Named(ass.name.to_string()),
+                        (_, RawChildTarget::Member(Member::Named(name))) => {
+                            ArgType::Unnamed(Some(name.to_string()))
+                        }
+                        _ => ArgType::Unnamed(None),
+                    };
+
                     let arg = Arg {
-                        typ: match (assign, &target) {
-                            (Some(ass), _) => ArgType::Named(ass.name.to_string()),
-                            (_, RawChildTarget::Member(Member::Named(name))) => {
-                                ArgType::Unnamed(Some(name.to_string()))
-                            }
-                            _ => ArgType::Unnamed(None),
-                        },
+                        typ,
                         val: parse_quote! { #parent #dot_token #target #cast },
                     };
 
@@ -163,8 +168,8 @@ impl Parse for RawArg {
             let content;
             RawArg::Splat {
                 _splat_token: input.parse()?,
-                parent: input.parse()?,
-                _bracket_token: bracketed!(content in input),
+                parent: Expr::parse_without_eager_brace(input)?,
+                _brace_token: braced!(content in input),
                 children: content.parse_terminated(RawChild::parse, Token![,])?,
             }
         } else {
