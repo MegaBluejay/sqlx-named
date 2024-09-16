@@ -241,33 +241,32 @@ fn query_generic(
 }
 
 macro_rules! def_variant {
-    ($in_ident:ident, $out_ident:ident, $as_type:expr, $file:expr) => {
+    ($ident:ident) => {
         #[proc_macro]
-        pub fn $in_ident(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+        pub fn $ident(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+            const IDENT_STR: &str = stringify!($ident);
             let variant = QueryVariant {
-                file: $file,
-                as_type: $as_type,
+                file: const_str::contains!(IDENT_STR, "file"),
+                as_type: const_str::contains!(IDENT_STR, "as"),
             };
-            let out_ident = Ident::new(stringify!($out_ident), Span::call_site());
+            let out_ident = Ident::new(
+                const_str::replace!(IDENT_STR, "_file", ""),
+                Span::call_site(),
+            );
             query_generic(variant, out_ident, input)
         }
     };
 }
 
-def_variant!(query, query, false, false);
-def_variant!(query_as, query_as, true, false);
-def_variant!(query_as_unchecked, query_as_unchecked, true, false);
-def_variant!(query_file, query, false, true);
-def_variant!(query_file_as, query_as, true, true);
-def_variant!(query_file_as_unchecked, query_as_unchecked, true, true);
-def_variant!(query_file_scalar, query_scalar, false, true);
-def_variant!(
-    query_file_scalar_unchecked,
-    query_scalar_unchecked,
-    false,
-    true
-);
-def_variant!(query_file_unchecked, query_unchecked, false, true);
-def_variant!(query_scalar, query_scalar, false, false);
-def_variant!(query_scalar_unchecked, query_scalar_unchecked, false, false);
-def_variant!(query_unchecked, query_unchecked, false, false);
+def_variant!(query);
+def_variant!(query_as);
+def_variant!(query_as_unchecked);
+def_variant!(query_file);
+def_variant!(query_file_as);
+def_variant!(query_file_as_unchecked);
+def_variant!(query_file_scalar);
+def_variant!(query_file_scalar_unchecked);
+def_variant!(query_file_unchecked);
+def_variant!(query_scalar);
+def_variant!(query_scalar_unchecked);
+def_variant!(query_unchecked);
